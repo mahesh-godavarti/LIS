@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Mahesh Godavarti. Licensed under CC BY-NC-SA 4.0.
+__pycache__/
+*.pyc
+*.log
+!results/*.log
+checkpoints*/
+*.pt
+/lis_results_*.json
+/results_*.json
+queue_*.sh
+local_*
+primed_zeroshot_full.py
+repro/

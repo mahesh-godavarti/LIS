@@ -1,0 +1,6 @@
+== address ablation, true fact at a random position
+RESULT address = content                                chain2 h@5=0.626 ppl=  3.97   chain3 h@5=0.198 ppl=  6.94
+RESULT address = shared_content                         chain2 h@5=0.161 ppl= 39.44   chain3 h@5=0.012 ppl= 67.62
+RESULT address = constant                               chain2 h@5=0.000 ppl=2058.98   chain3 h@5=0.000 ppl=2712.64
+RESULT address = random_per_fact                        chain2 h@5=0.000 ppl=2567.96   chain3 h@5=0.000 ppl=3125.86
+RESULT address = none                                   chain2 h@5=0.000 ppl=3135.35   chain3 h@5=0.000 ppl=3240.25
