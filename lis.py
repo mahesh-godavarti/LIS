@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Mahesh Godavarti
-# Licensed under CC BY-NC-SA 4.0. See LICENSE file for details.
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE file for details.
 #
 # -----------------------------------------------------------------------------
 # Primed Zero-Shot KG+Text Paired Experiment
@@ -42,6 +42,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 import json
+import math
 import numpy as np
 from collections import defaultdict
 from tqdm import tqdm
@@ -545,6 +546,26 @@ class PairedDataset:
             key = frozenset(fact["entities"])
             self.facts_by_entities[key].append(i)
 
+    def _training_layout(self, true_idx):
+        """Order of facts for one training sequence and their fact ids (0 = true, 1.. = distractors).
+        Default (public protocol): one distractor then the true fact. train_mix (2026-10-16): k distractors,
+        k uniform in 0..n_priming, each same-rel or same-entities at random, true fact at a random position."""
+        if not getattr(self, "train_mix", False):
+            d_idx = self._pick_distractor_same_rel(true_idx) if random.random() < 0.5 else self._pick_distractor_same_entities(true_idx)
+            if getattr(self, "train_shuffle", False) and random.random() < 0.5:   # 2026-10-17: public layout but the true fact's position randomised
+                return [true_idx, d_idx], [0, 1]
+            return [d_idx, true_idx], [1, 0]
+        k = random.randint(0, getattr(self, "n_priming_train", 4))
+        picked = []
+        for _ in range(k):
+            for _try in range(10):
+                d = self._pick_distractor_same_rel(true_idx) if random.random() < 0.5 else self._pick_distractor_same_entities(true_idx)
+                if d not in picked: break
+            picked.append(d)
+        order = list(range(k + 1)); random.shuffle(order)           # position 0..k for the true fact and the k distractors
+        facts = [true_idx] + picked; fids = [0] + list(range(1, k + 1))
+        return [facts[i] for i in order], [fids[i] for i in order]
+
     def _pick_distractor_same_rel(self, true_idx):
         """Pick a random distractor from the SAME RELATION (different entities)."""
         rel = self.fact_list[true_idx]["rel"]
@@ -613,24 +634,15 @@ class PairedDataset:
             fact = self.fact_list[idx]
             variant = random.choice(self.fact_variants[idx])
 
-            # Build true KG tokens
-            true_kg_str = self._linearize_fact_permuted(fact)
-            true_kg_tokens = self.vocab.encode_sentence(true_kg_str)
-
-            # Pick one distractor at random: same-rel or same-entities
-            if random.random() < 0.5:
-                d_idx = self._pick_distractor_same_rel(idx)
-            else:
-                d_idx = self._pick_distractor_same_entities(idx)
-            d_fact = self.fact_list[d_idx]
-            d_kg_str = self._linearize_fact_permuted(d_fact)
-            d_kg_tokens = self.vocab.encode_sentence(d_kg_str)
-
-            # Distractor first, true fact closest to text
-            # Concatenate: distractor | true_fact | text
+            # Facts in training order (public protocol: distractor | true; train_mix: 0..n distractors, true anywhere)
+            order, _fids = self._training_layout(idx)
             sep_tokens = self.vocab.encode_sentence(" | ")
-            encoded = d_kg_tokens + sep_tokens + true_kg_tokens
-            seg_lens = [len(d_kg_tokens), len(sep_tokens), len(true_kg_tokens)]
+            encoded, seg_lens = [], []
+            for j, f_idx in enumerate(order):
+                kg_tokens = self.vocab.encode_sentence(self._linearize_fact_permuted(self.fact_list[f_idx]))
+                if j > 0:
+                    encoded += sep_tokens; seg_lens.append(len(sep_tokens))
+                encoded += kg_tokens; seg_lens.append(len(kg_tokens))
 
             text_str = format_template(fact["entities"], fact["roles"], variant, fact["rel"])
             text_tokens = self.vocab.encode_sentence(" | " + text_str)
@@ -695,37 +707,17 @@ class PairedDataset:
             fact = self.fact_list[idx]
             variant = random.choice(self.fact_variants[idx])
 
-            # Build true KG data
-            true_seq, true_lens, true_perm = self._build_native_kg_data(fact)
-
-            # Pick one distractor at random: same-rel or same-entities
-            if random.random() < 0.5:
-                d_idx = self._pick_distractor_same_rel(idx)
-            else:
-                d_idx = self._pick_distractor_same_entities(idx)
-            d_fact = self.fact_list[d_idx]
-            d_seq, d_lens, d_perm = self._build_native_kg_data(d_fact)
-
-            # Distractor first, true fact closest to text
-            # fact_id: 0=true, 1=distractor
-            d_item = (d_seq, d_lens, d_perm, d_fact["rel"], 1)
-            t_item = (true_seq, true_lens, true_perm, fact["rel"], 0)
-
-            # Concatenate: distractor | true_fact | text
+            # Facts in training order (public protocol: distractor | true; train_mix: 0..n distractors, true anywhere)
+            order, fids = self._training_layout(idx)
             sep_tokens = self.vocab.encode_sentence(" | ")
-            seq = d_item[0] + sep_tokens + t_item[0]
-            e_lens = (d_item[1]
-                      + [len(sep_tokens)]
-                      + t_item[1])
-            r_slots = (d_item[2]
-                       + [TEXT_SLOT]
-                       + t_item[2])
-            r_names = ([d_item[3]] * len(d_item[1])
-                       + [d_item[3]]
-                       + [t_item[3]] * len(t_item[1]))
-            f_ids = ([d_item[4]] * len(d_item[1])
-                     + [-1]
-                     + [t_item[4]] * len(t_item[1]))
+            seq, e_lens, r_slots, r_names, f_ids = [], [], [], [], []
+            for j, (f_idx, fid) in enumerate(zip(order, fids)):
+                f_fact = self.fact_list[f_idx]
+                f_seq, f_lens, f_perm = self._build_native_kg_data(f_fact)
+                if j > 0:
+                    seq += sep_tokens; e_lens.append(len(sep_tokens)); r_slots.append(TEXT_SLOT); r_names.append(prev_rel); f_ids.append(-1)
+                seq += f_seq; e_lens += f_lens; r_slots += f_perm; r_names += [f_fact["rel"]] * len(f_lens); f_ids += [fid] * len(f_lens)
+                prev_rel = f_fact["rel"]
 
             # Add text
             text_str = format_template(fact["entities"], fact["roles"], variant, fact["rel"])
@@ -1355,12 +1347,17 @@ class ModelJ(nn.Module):
 def train_model_paired(model, dataset, config, model_type="B", name="?",
                        checkpoint_path=None):
     """Train on paired KG+text sequences."""
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=getattr(config, "weight_decay", 0.01))
     model.to(config.device)
     model.train()
     losses_log = {"loss": [], "iter": []}
+    cosine = getattr(config, "cosine", False); warm = min(2000, config.max_iters // 20)
 
     for it in tqdm(range(config.max_iters), desc=f"Model {name}"):
+        if cosine:   # linear warmup, cosine decay to 10% of lr (2026-10-16)
+            if it < warm: lr_t = config.lr * (it + 1) / warm
+            else: lr_t = 0.1 * config.lr + 0.9 * config.lr * 0.5 * (1 + math.cos(math.pi * (it - warm) / max(1, config.max_iters - warm)))
+            for g in optimizer.param_groups: g["lr"] = lr_t
         if model_type == "B":
             x, y, _segment_lens = dataset.get_paired_batch_B(config.batch_size, config.device)
             _, loss = model.forward(x, y)
@@ -2168,6 +2165,7 @@ def run_experiment(seed=42, models_to_run=None, n_train=500, n_test=100,
 
     # Build paired dataset
     paired_dataset = PairedDataset(train_facts, vocab, cfg.block_size)
+    paired_dataset.train_mix = getattr(cfg, "train_mix", False); paired_dataset.n_priming_train = getattr(cfg, "n_priming_train", 4); paired_dataset.train_shuffle = getattr(cfg, "train_shuffle", False)
 
     # Build eval prompts — subsample for large name sets
     max_eval_positions = 50
@@ -2319,6 +2317,9 @@ def main():
     parser.add_argument("--max_name_len", type=int, default=8)
     parser.add_argument("--iters", type=int, default=None)
     parser.add_argument("--seeds", type=int, default=None)
+    parser.add_argument("--train_shuffle", action="store_true", help="public two-fact layout, but the true fact is first or second at random")
+    parser.add_argument("--train_mix", action="store_true", help="training sequences: 0..n_priming distractors, true fact at a random position (default: one distractor then the true fact)")
+    parser.add_argument("--dropout", type=float, default=None); parser.add_argument("--weight_decay", type=float, default=0.01); parser.add_argument("--cosine", action="store_true", help="warmup + cosine lr decay to 10%")
     parser.add_argument("--seed_offset", type=int, default=0,
                         help="first seed to run (seeds run are seed_offset .. seed_offset+seeds-1)")
     parser.add_argument("--n_embed", type=int, default=None)
@@ -2346,6 +2347,9 @@ def main():
         cfg.n_layers = args.n_layers
     if args.softmax:
         cfg.use_softmax = True
+    if args.dropout is not None: cfg.dropout = args.dropout
+    cfg.weight_decay = args.weight_decay; cfg.cosine = args.cosine
+    cfg.train_mix = args.train_mix; cfg.n_priming_train = args.n_priming; cfg.train_shuffle = args.train_shuffle
     global EVAL_TRUE_POS
     EVAL_TRUE_POS = args.eval_true_pos
 
@@ -2382,7 +2386,7 @@ def main():
           f"n_priming={args.n_priming}, "
           f"name_len={args.min_name_len}-{args.max_name_len}, n_embed={cfg.n_embed}, "
           f"n_layers={cfg.n_layers}, max_iters={cfg.max_iters}, "
-          f"batch_size={cfg.batch_size}, lr={cfg.lr}, device={cfg.device}, "
+          f"batch_size={cfg.batch_size}, lr={cfg.lr}, device={cfg.device}, dropout={cfg.dropout}, wd={getattr(cfg, 'weight_decay', 0.01)}, cosine={getattr(cfg, 'cosine', False)}, train_mix={getattr(cfg, 'train_mix', False)}, train_shuffle={getattr(cfg, 'train_shuffle', False)}, "
           f"attention={attn_type}")
     print(f"Models: {models}")
 
