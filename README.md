@@ -126,3 +126,5 @@ results_fixed_position/  — earlier fixed-position protocol: result files, aggr
 ## License
 
 Copyright (c) 2026 Mahesh Godavarti. Licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0): free to use, change and share for any noncommercial purpose; commercial use is not permitted. See [LICENSE](LICENSE).
+
+**Patent pending.** The content-addressed attention described and implemented here is the subject of a pending patent application.
